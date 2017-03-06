@@ -77,7 +77,8 @@ enum fann_train_enum
 	FANN_TRAIN_INCREMENTAL = 0,
 	FANN_TRAIN_BATCH,
 	FANN_TRAIN_RPROP,
-	FANN_TRAIN_QUICKPROP
+	FANN_TRAIN_QUICKPROP,
+	FANN_TRAIN_SARPROP
 };
 
 /* Constant: FANN_TRAIN_NAMES
@@ -95,7 +96,8 @@ static char const *const FANN_TRAIN_NAMES[] = {
 	"FANN_TRAIN_INCREMENTAL",
 	"FANN_TRAIN_BATCH",
 	"FANN_TRAIN_RPROP",
-	"FANN_TRAIN_QUICKPROP"
+	"FANN_TRAIN_QUICKPROP",
+	"FANN_TRAIN_SARPROP"
 };
 
 /* Enums: fann_activationfunc_enum
@@ -222,7 +224,9 @@ enum fann_activationfunc_enum
 	FANN_SIN_SYMMETRIC,
 	FANN_COS_SYMMETRIC,
 	FANN_SIN,
-	FANN_COS
+	FANN_COS,
+	FANN_SOFTMAX,
+	FANN_NUM_ACTIVATION_FUNCTIONS
 };
 
 /* Constant: FANN_ACTIVATIONFUNC_NAMES
@@ -254,7 +258,8 @@ static char const *const FANN_ACTIVATIONFUNC_NAMES[] = {
 	"FANN_SIN_SYMMETRIC",
 	"FANN_COS_SYMMETRIC",
 	"FANN_SIN",
-	"FANN_COS"
+	"FANN_COS",
+	"FANN_SOFTMAX"
 };
 
 /* Enum: fann_errorfunc_enum
@@ -272,7 +277,8 @@ static char const *const FANN_ACTIVATIONFUNC_NAMES[] = {
 enum fann_errorfunc_enum
 {
 	FANN_ERRORFUNC_LINEAR = 0,
-	FANN_ERRORFUNC_TANH
+	FANN_ERRORFUNC_TANH,
+	FANN_NUM_ERRORFUNCS
 };
 
 /* Constant: FANN_ERRORFUNC_NAMES
@@ -649,6 +655,14 @@ struct fann
 	 */
 	unsigned int cascade_max_cand_epochs;	
 
+	/* Minimum epochs to train the output neurons during cascade training
+	 */
+	unsigned int cascade_min_out_epochs;
+	
+	/* Minimum epochs to train the candidate neurons during cascade training
+	 */
+	unsigned int cascade_min_cand_epochs;	
+
 	/* An array consisting of the activation functions used when doing
 	 * cascade training.
 	 */
@@ -716,6 +730,21 @@ struct fann
 	/* The initial stepsize */
 	float rprop_delta_zero;
         
+	/* Defines how much the weights are constrained to smaller values at the beginning */
+	float sarprop_weight_decay_shift;
+
+	/* Decides if the stepsize is too big with regard to the error */
+	float sarprop_step_error_threshold_factor;
+
+	/* Defines how much the stepsize is influenced by the error */
+	float sarprop_step_error_shift;
+
+	/* Defines how much the epoch influences weight decay and noise */
+	float sarprop_temperature;
+
+	/* Current training epoch */
+	unsigned int sarprop_epoch;
+
 	/* Used to contain the slope errors used during batch training
 	 * Is allocated during first training session,
 	 * which means that if we do not train, it is never allocated.

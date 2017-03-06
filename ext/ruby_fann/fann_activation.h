@@ -19,6 +19,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 #ifndef __fann_activation_h__
 #define __fann_activation_h__
+
+
 /* internal include file, not to be included directly
  */
 
@@ -82,6 +84,18 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #define fann_cos_real(sum) (cos(sum)/2.0f+0.5f)
 #define fann_cos_derive(steepness, sum) (steepness*-sin(steepness*sum)/2.0f)
 
+/* FANN_SOFTMAX */
+#define fann_exp_real(sum) (exp(sum))
+//w.r.t cross-entropy
+#define fann_softmax_derive(steepness,value) (steepness)
+//w.r.t mse
+#define fann_softmax_derive_ls(steepness,value) (steepness*value*(1-value))
+
+#define uses_cross_entropy(activation_function)				\
+    (    activation_function==FANN_SOFTMAX				\
+      || activation_function==FANN_SIGMOID				\
+      || activation_function==FANN_SIGMOID_STEPWISE   )
+
 #define fann_activation_switch(activation_function, value, result) \
 switch(activation_function) \
 { \
@@ -136,6 +150,8 @@ switch(activation_function) \
 	case FANN_COS: \
 		result = (fann_type)fann_cos_real(value); \
         break; \
+	case FANN_SOFTMAX: \
+	    result = (fann_type)fann_exp_real(value); break;	\
 	case FANN_GAUSSIAN_STEPWISE: \
         result = 0; \
         break; \

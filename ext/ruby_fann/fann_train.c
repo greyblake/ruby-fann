@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <math.h>
 
 #include "config.h"
 #include "fann.h"
@@ -69,6 +70,8 @@ fann_type fann_activation_derived(unsigned int activation_function,
 			return (fann_type) fann_sin_derive(steepness, sum);
 		case FANN_COS:
 			return (fann_type) fann_cos_derive(steepness, sum);
+		case FANN_SOFTMAX:
+			return (fann_type) fann_softmax_derive(steepness, value);
 		case FANN_THRESHOLD:
 			fann_error(NULL, FANN_E_CANT_TRAIN_ACTIVATION);
 	}
@@ -82,9 +85,11 @@ fann_type fann_activation_derived(unsigned int activation_function,
 fann_type fann_activation(struct fann * ann, unsigned int activation_function, fann_type steepness,
 						  fann_type value)
 {
-	value = fann_mult(steepness, value);
-	fann_activation_switch(activation_function, value, value);
-	return value;
+    if (activation_function == FANN_SOFTMAX)
+	fann_error((struct fann_error *) ann, FANN_E_CANT_USE_ACTIVATION);
+    value = fann_mult(steepness, value);
+    fann_activation_switch(activation_function, value, value);
+    return value;
 }
 
 /* Trains the network with the backpropagation algorithm.
@@ -132,19 +137,25 @@ fann_type fann_update_MSE(struct fann *ann, struct fann_neuron* neuron, fann_typ
 		case FANN_LINEAR_PIECE:
 		case FANN_SIN:
 		case FANN_COS:
+		case FANN_SOFTMAX:
 			break;
 	}
 
 #ifdef FIXEDFANN
-		neuron_diff2 =
-			(neuron_diff / (float) ann->multiplier) * (neuron_diff / (float) ann->multiplier);
-#else
-		neuron_diff2 = (float) (neuron_diff * neuron_diff);
+	neuron_diff /= (float) ann->multiplier;
 #endif
 
-	ann->MSE_value += neuron_diff2;
+	if (!uses_cross_entropy(neuron->activation_function))
+	{
+	    neuron_diff2 = (float) (neuron_diff * neuron_diff);
+	    ann->MSE_value += neuron_diff2;
+	} else {
+	    fann_type t = neuron_diff + neuron->value;
+	    ann->MSE_value -= t > 0 ? t * log(neuron->value/t) : 0;
+	}
 
-	/*printf("neuron_diff %f = (%f - %f)[/2], neuron_diff2=%f, sum=%f, MSE_value=%f, num_MSE=%d\n", neuron_diff, *desired_output, neuron_value, neuron_diff2, last_layer_begin->sum, ann->MSE_value, ann->num_MSE); */
+/*	printf("neuron_diff %f = (%f - %f)[/2], neuron_diff2=%f, sum=%f, MSE_value=%f, num_MSE=%d\n", neuron_diff, *desired_output, neuron_value, 
+neuron_diff2, last_layer_begin->sum, ann->MSE_value, ann->num_MSE); */
 	if(fann_abs(neuron_diff) >= ann->bit_fail_limit)
 	{
 		ann->num_bit_fail++;
@@ -171,6 +182,7 @@ FANN_EXTERNAL fann_type *FANN_API fann_test(struct fann *ann, fann_type * input,
 		neuron_value = *output_it;
 
 		neuron_diff = (*desired_output - neuron_value);
+
 
 		neuron_diff = fann_update_MSE(ann, output_neuron, neuron_diff);
 		
@@ -206,6 +218,7 @@ FANN_EXTERNAL unsigned int FANN_API fann_get_bit_fail(struct fann *ann)
  */
 FANN_EXTERNAL void FANN_API fann_reset_MSE(struct fann *ann)
 {
+/*printf("resetMSE %d %f\n", ann->num_MSE, ann->MSE_value);*/
 	ann->num_MSE = 0;
 	ann->MSE_value = 0;
 	ann->num_bit_fail = 0;
@@ -259,7 +272,7 @@ void fann_compute_MSE(struct fann *ann, fann_type * desired_output)
 
 		neuron_diff = fann_update_MSE(ann, last_layer_begin, neuron_diff);
 
-		if(ann->train_error_function)
+		if(!uses_cross_entropy(last_layer_begin->activation_function) && ann->train_error_function)
 		{						/* TODO make switch when more functions */
 			if(neuron_diff < -.9999999)
 				neuron_diff = -17.0;
@@ -269,9 +282,13 @@ void fann_compute_MSE(struct fann *ann, fann_type * desired_output)
 				neuron_diff = (fann_type) log((1.0 + neuron_diff) / (1.0 - neuron_diff));
 		}
 
+
 		*error_it = fann_activation_derived(last_layer_begin->activation_function,
-											last_layer_begin->activation_steepness, neuron_value,
-											last_layer_begin->sum) * neuron_diff;
+						    last_layer_begin->activation_steepness, neuron_value,
+						    last_layer_begin->sum) * neuron_diff;
+
+/*		printf("desired: %f actual: %f diff: %f error:%f steepness:%f\n",
+ *desired_output, neuron_value, neuron_diff,*error_it,last_layer_begin->activation_steepness); */
 
 		desired_output++;
 		error_it++;
@@ -764,13 +781,93 @@ void fann_update_weights_irpropm(struct fann *ann, unsigned int first_weight, un
 	}
 }
 
+/* INTERNAL FUNCTION
+   The SARprop- algorithm
+*/
+void fann_update_weights_sarprop(struct fann *ann, unsigned int epoch, unsigned int first_weight, unsigned int past_end)
+{
+	/* TODO: seed random number generator; this should currently be done in the enduser apps */
+	fann_type *train_slopes = ann->train_slopes;
+	fann_type *weights = ann->weights;
+	fann_type *prev_steps = ann->prev_steps;
+	fann_type *prev_train_slopes = ann->prev_train_slopes;
+
+	fann_type prev_step, slope, prev_slope, next_step = 0, same_sign;
+
+	/* These should be set from variables */
+	float increase_factor = ann->rprop_increase_factor;	/*1.2; */
+	float decrease_factor = ann->rprop_decrease_factor;	/*0.5; */
+	/* TODO: why is delta_min 0.0 in iRprop? SARPROP uses 1x10^-6 (Braun and Riedmiller, 1993) */
+	float delta_min = 0.000001;
+	float delta_max = ann->rprop_delta_max;	/*50.0; */
+	float weight_decay_shift = ann->sarprop_weight_decay_shift; /* ld 0.01 = -6.644 */
+	float step_error_threshold_factor = ann->sarprop_step_error_threshold_factor; /* 0.1 */
+	float step_error_shift = ann->sarprop_step_error_shift; /* ld 3 = 1.585 */
+	float T = ann->sarprop_temperature;
+	float MSE = fann_get_MSE(ann);
+	float RMSE = sqrt(MSE);
+
+	unsigned int i = first_weight;
+
+
+	/* for all weights; TODO: are biases included? */
+	for(; i != past_end; i++)
+	{
+		/* TODO: confirm whether 1x10^-6 == delta_min is really better */
+		prev_step = fann_max(prev_steps[i], (fann_type) 0.000001);	/* prev_step may not be zero because then the training will stop */
+		/* calculate SARPROP slope; TODO: better as new error function? (see SARPROP paper)*/
+		slope = -train_slopes[i] - weights[i] * fann_exp2(-T * epoch + weight_decay_shift);
+
+		/* TODO: is prev_train_slopes[i] 0.0 in the beginning? */
+		prev_slope = prev_train_slopes[i];
+
+		same_sign = prev_slope * slope;
+
+		if(same_sign > 0.0)
+		{
+			next_step = fann_min(prev_step * increase_factor, delta_max);
+			/* TODO: are the signs inverted? see differences between SARPROP paper and iRprop */
+			if (slope < 0.0)
+				weights[i] += next_step;
+			else
+				weights[i] -= next_step;
+		}
+		else if(same_sign < 0.0)
+		{
+			if(prev_step < step_error_threshold_factor * MSE)
+				next_step = prev_step * decrease_factor + (float)rand() / RAND_MAX * RMSE * fann_exp2(-T * epoch + step_error_shift);
+			else
+				next_step = fann_max(prev_step * decrease_factor, delta_min);
+
+			slope = 0.0;
+		}
+		else
+		{
+			if(slope < 0.0)
+				weights[i] += prev_step;
+			else
+				weights[i] -= prev_step;
+		}
+
+
+		/*if(i == 2){
+		 * printf("weight=%f, slope=%f, next_step=%f, prev_step=%f\n", weights[i], slope, next_step, prev_step);
+		 * } */
+
+		/* update global data arrays */
+		prev_steps[i] = next_step;
+		prev_train_slopes[i] = slope;
+		train_slopes[i] = 0.0;
+	}
+}
+
 #endif
 
 FANN_GET_SET(enum fann_train_enum, training_algorithm)
 FANN_GET_SET(float, learning_rate)
 
 FANN_EXTERNAL void FANN_API fann_set_activation_function_hidden(struct fann *ann,
-																enum fann_activationfunc_enum activation_function)
+								enum fann_activationfunc_enum activation_function)
 {
 	struct fann_neuron *last_neuron, *neuron_it;
 	struct fann_layer *layer_it;
@@ -957,6 +1054,10 @@ FANN_GET_SET(float, rprop_decrease_factor)
 FANN_GET_SET(float, rprop_delta_min)
 FANN_GET_SET(float, rprop_delta_max)
 FANN_GET_SET(float, rprop_delta_zero)
+FANN_GET_SET(float, sarprop_weight_decay_shift)
+FANN_GET_SET(float, sarprop_step_error_threshold_factor)
+FANN_GET_SET(float, sarprop_step_error_shift)
+FANN_GET_SET(float, sarprop_temperature)
 FANN_GET_SET(enum fann_stopfunc_enum, train_stop_function)
 FANN_GET_SET(fann_type, bit_fail_limit)
 FANN_GET_SET(float, learning_momentum)
